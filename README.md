@@ -1,6 +1,6 @@
 # Emission + Room Lumens + Color Temp
 
-**Author:** George Papadopoulos / 3D Logic Class  
+**Author:** 3D Logic Class  
 **Version:** v1.0  
 **Blender Compatibility:** 3.0 and above  
 
