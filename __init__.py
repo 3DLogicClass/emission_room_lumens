@@ -47,6 +47,7 @@ DEPENDENCIES
 import bpy
 import bmesh
 from mathutils import Vector
+import numpy as np
 
 
 # ------------------------------------------------------------------
@@ -101,44 +102,82 @@ def get_active_material_area(obj):
 
 def bounding_box_area_xy(props, context):
     """
-    Compute an estimated floor area (XY projection) from the bounding box of selected wall objects.
+    Compute the projected floor area of a room regardless of model rotation.
 
-    This can be used as a quick way to determine the size of a room
-    without measuring manually.
+    This function analyzes the geometry of the selected wall objects
+    (or the active object if none are provided) and computes the area
+    of their projection onto the dominant geometric plane — typically
+    the "floor" plane. This makes the result invariant to the model’s
+    rotation in world space.
 
     Args:
-        props (MaterialEmissionProperties): Property group containing wall references.
-        context (bpy.context): Blender context (used for fallback object).
+        props (MaterialEmissionProperties): Property group holding references
+            to the wall objects (wall_a, wall_b).
+        context (bpy.types.Context): Blender context used for fallback object
+            access (active_object).
 
     Returns:
-        float: Calculated floor area in square meters.
+        float: Estimated floor area in square meters.
     """
+    # Collect reference objects for bounding calculation
     objects = []
-    if props.wall_a: objects.append(props.wall_a)
-    if props.wall_b: objects.append(props.wall_b)
-    if len(objects) == 1:
-        # Duplicate single object to avoid zero-area result
-        objects.append(objects[0])
-    elif len(objects) == 0 and context.active_object and context.active_object.type == 'MESH':
-        # Use active object as fallback
-        objects = [context.active_object, context.active_object]
+    if props.wall_a:
+        objects.append(props.wall_a)
+    if props.wall_b:
+        objects.append(props.wall_b)
 
-    if len(objects) < 2:
+    # Fallback: use active mesh if no walls are defined
+    if len(objects) == 0 and context.active_object and context.active_object.type == 'MESH':
+        objects = [context.active_object]
+
+    if not objects:
         return 0.0
 
-    xs, ys = [], []
+    # Gather all vertex coordinates in world space
+    verts_world = []
     for obj in objects:
         if obj and obj.type == 'MESH':
             for v in obj.data.vertices:
-                wc = obj.matrix_world @ v.co
-                xs.append(wc.x)
-                ys.append(wc.y)
+                verts_world.append(obj.matrix_world @ v.co)
 
-    if not xs or not ys:
+    # At least three vertices are required to define a plane
+    if len(verts_world) < 3:
         return 0.0
 
-    # Return rectangle area projected onto XY plane
-    return (max(xs) - min(xs)) * (max(ys) - min(ys))
+    # Convert to NumPy array for geometric analysis
+    pts = np.array([[v.x, v.y, v.z] for v in verts_world])
+
+    # Compute the mean center of all points
+    center = pts.mean(axis=0)
+
+    # Subtract center to normalize for PCA
+    pts_centered = pts - center
+
+    # Principal Component Analysis (PCA) to find the dominant plane
+    cov = np.cov(pts_centered.T)
+    eigvals, eigvecs = np.linalg.eig(cov)
+
+    # The eigenvector with the smallest eigenvalue corresponds to the plane normal
+    normal = eigvecs[:, np.argmin(eigvals)]
+
+    # Define two orthogonal axes lying in the plane
+    axis_x = eigvecs[:, np.argmax(eigvals)]
+    axis_y = np.cross(normal, axis_x)
+
+    # Normalize the basis vectors
+    axis_x /= np.linalg.norm(axis_x)
+    axis_y /= np.linalg.norm(axis_y)
+
+    # Project all 3D vertices onto the plane’s 2D coordinate system
+    proj = np.array([[np.dot(p - center, axis_x), np.dot(p - center, axis_y)] for p in pts])
+
+    # Compute the bounding rectangle in the 2D projected space
+    min_x, max_x = proj[:, 0].min(), proj[:, 0].max()
+    min_y, max_y = proj[:, 1].min(), proj[:, 1].max()
+
+    # Calculate and return the area of that rectangle
+    area = abs((max_x - min_x) * (max_y - min_y))
+    return float(area)
 
 
 def object_height(obj):
