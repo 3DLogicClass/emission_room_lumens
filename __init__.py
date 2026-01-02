@@ -407,6 +407,11 @@ class MATERIAL_PT_emission_calculator(bpy.types.Panel):
 
         props = mat.emission_props
         calculated_area = bounding_box_area_xy(props, context)
+        
+        # New Quick Setup Section
+        box = layout.box()
+        box.label(text="Quick Setup", icon='LIGHT_DATA')
+        box.operator("material.make_it_lamp", icon='SHADING_RENDERED')        
 
         # --- Room Estimation UI ---
         box = layout.box()
@@ -483,7 +488,85 @@ class MATERIAL_PT_emission_calculator(bpy.types.Panel):
 # ------------------------------------------------------------------
 # OPERATORS
 # ------------------------------------------------------------------
+class MATERIAL_OT_make_it_lamp(bpy.types.Operator):
+    """
+    Automates the creation of a physically accurate lamp material.
+    Cleans up legacy shaders and redundant Blackbody nodes to ensure a 
+    fresh Principled BSDF setup with synchronized color temperature.
+    """
+    bl_idname = "material.make_it_lamp"
+    bl_label = "Make it Lamp"
+    bl_description = "Purge old nodes and setup PBR lamp properties with a single Blackbody link"
+    bl_options = {'REGISTER', 'UNDO'}
 
+    def execute(self, context):
+        mat = context.object.active_material
+        if not mat:
+            self.report({'WARNING'}, "No active material found")
+            return {'CANCELLED'}
+        
+        # Enable nodes and access the node tree
+        mat.use_nodes = True
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+
+        # 1. CLEAN SWEEP: REMOVE EXISTING SHADERS AND REDUNDANT BLACKBODY NODES
+        # We iterate through a copy of the nodes list to safely remove any node 
+        # that acts as a shader or a Blackbody controller. 
+        # This prevents "node clutter" and overlapping nodes.
+        for node in list(nodes):
+            is_shader = any(output.type == 'SHADER' for output in node.outputs)
+            if (is_shader and node.type != 'OUTPUT_MATERIAL') or node.type == 'BLACKBODY':
+                nodes.remove(node)
+
+        # 2. CREATE AND INITIALIZE FRESH PRINCIPLED BSDF
+        # Fresh node creation ensures no leftover settings from legacy material types.
+        principled = nodes.new(type='ShaderNodeBsdfPrincipled')
+        principled.location = (0, 300)
+        
+        # Ensure a Material Output exists for the final render connection
+        output_node = next((n for n in nodes if n.type == 'OUTPUT_MATERIAL'), None)
+        if not output_node:
+            output_node = nodes.new(type='ShaderNodeOutputMaterial')
+            output_node.location = (300, 300)
+        
+        # Connect the new shader to the material surface output
+        links.new(principled.outputs['BSDF'], output_node.inputs['Surface'])
+
+        # 3. APPLY PHYSICAL SURFACE PRESETS
+        # Metallic 0.0: Glass and plastics are non-metallic (dielectric) materials.
+        # Roughness 0.050: Low values provide the sharp, glossy reflections of a glass bulb.
+        # IOR 1.450: The standard physical Index of Refraction for architectural glass.
+        principled.inputs['Metallic'].default_value = 0.0
+        principled.inputs['Roughness'].default_value = 0.050
+        principled.inputs['IOR'].default_value = 1.450
+        
+        # 4. CONFIGURE CYCLES TRANSMISSION & SPECULAR
+        # IOR Level 0.705: Adjusted to match the specific reflection intensity shown in references.
+        if 'IOR Level' in principled.inputs:
+            principled.inputs['IOR Level'].default_value = 0.705
+        # Transmission Weight 1.0: Converts the surface from opaque to fully transparent for glass.
+        if 'Transmission Weight' in principled.inputs:
+            principled.inputs['Transmission Weight'].default_value = 1.000
+            
+        # 5. DISABLE SECONDARY REFLECTION LAYERS
+        # Disabling Coat and Sheen ensures the glass remains clear without redundant highlights.
+        if 'Coat Weight' in principled.inputs:
+            principled.inputs['Coat Weight'].default_value = 0.0
+        if 'Sheen Weight' in principled.inputs:
+            principled.inputs['Sheen Weight'].default_value = 0.0
+
+        # 6. SETUP A SINGLE BLACKBODY TEMPERATURE NODE
+        # Creating a fresh Blackbody node to drive the light hue through physical Kelvin units.
+        bb = nodes.new(type='ShaderNodeBlackbody')
+        # Positioning to the left of the Principled BSDF for a clean hierarchy
+        bb.location = (principled.location.x - 450, principled.location.y - 200)
+        bb.inputs[0].default_value = 3500.0  # Industry standard warm white temperature
+        links.new(bb.outputs[0], principled.inputs['Emission Color'])
+
+        self.report({'INFO'}, "Material purged and PBR Lamp setup applied cleanly.")
+        return {'FINISHED'}
+        
 class MATERIAL_OT_calc_room_lumens(bpy.types.Operator):
     """Calculate recommended lumens and color temperatures for the selected room type."""
     bl_idname = "material.calc_room_lumens"
@@ -675,6 +758,7 @@ class MATERIAL_OT_calc_emission_strength(bpy.types.Operator):
 
 classes = (
     MaterialEmissionProperties,
+    MATERIAL_OT_make_it_lamp,
     MATERIAL_PT_emission_calculator,
     MATERIAL_OT_calc_room_lumens,
     MATERIAL_OT_use_lumens,
